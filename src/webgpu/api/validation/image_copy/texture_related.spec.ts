@@ -2,15 +2,14 @@ export const description = `Texture related validation tests for B2T copy and T2
 
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
 import { assert } from '../../../../common/util/util.js';
+import { kTextureDimensions, kTextureUsages } from '../../../capability_info.js';
+import { GPUConst } from '../../../constants.js';
 import {
   kColorTextureFormats,
   kSizedTextureFormats,
-  kTextureDimensions,
   kTextureFormatInfo,
-  kTextureUsages,
   textureDimensionAndFormatCompatible,
-} from '../../../capability_info.js';
-import { GPUConst } from '../../../constants.js';
+} from '../../../format_info.js';
 import { kResourceStates } from '../../../gpu_test.js';
 import { align } from '../../../util/math.js';
 import { virtualMipSize } from '../../../util/texture/base.js';
@@ -78,11 +77,13 @@ g.test('texture,device_mismatch')
     const { method, mismatched } = t.params;
     const sourceDevice = mismatched ? t.mismatchedDevice : t.device;
 
-    const texture = sourceDevice.createTexture({
-      size: { width: 4, height: 4, depthOrArrayLayers: 1 },
-      format: 'rgba8unorm',
-      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-    });
+    const texture = t.trackForCleanup(
+      sourceDevice.createTexture({
+        size: { width: 4, height: 4, depthOrArrayLayers: 1 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+      })
+    );
 
     t.testRun(
       { texture },
@@ -126,7 +127,7 @@ The texture must have the appropriate COPY_SRC/COPY_DST usage.
     const { usage0, usage1, method, size, dimension } = t.params;
 
     const usage = usage0 | usage1;
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size,
       dimension,
       format: 'rgba8unorm',
@@ -165,7 +166,7 @@ Note: we don't test 1D, 2D array and 3D textures because multisample is not supp
   .fn(t => {
     const { sampleCount, method } = t.params;
 
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size: { width: 4, height: 4, depthOrArrayLayers: 1 },
       sampleCount,
       format: 'rgba8unorm',
@@ -212,7 +213,7 @@ Test that the mipLevel of the copy must be in range of the texture.
   .fn(t => {
     const { mipLevelCount, mipLevel, method, size, dimension } = t.params;
 
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size,
       dimension,
       mipLevelCount,
@@ -267,6 +268,7 @@ Test the copy must be a full subresource if the texture's format is depth/stenci
   )
   .beforeAllSubcases(t => {
     const info = kTextureFormatInfo[t.params.format];
+    t.skipIfTextureFormatNotSupported(t.params.format);
     t.selectDeviceOrSkipTestCase(info.feature);
   })
   .fn(t => {
@@ -287,7 +289,7 @@ Test the copy must be a full subresource if the texture's format is depth/stenci
       size.height = 1;
     }
 
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size,
       dimension,
       format,
@@ -303,11 +305,7 @@ Test the copy must be a full subresource if the texture's format is depth/stenci
       success = false;
     }
 
-    const levelSize = virtualMipSize(
-      dimension,
-      [size.width, size.height, size.depthOrArrayLayers],
-      mipLevel
-    );
+    const levelSize = virtualMipSize(dimension, size, mipLevel);
     const copySize = [
       levelSize[0] + copyWidthModifier * info.blockWidth,
       levelSize[1] + copyHeightModifier * info.blockHeight,
@@ -357,17 +355,12 @@ Test that the texture copy origin must be aligned to the format's block size.
   )
   .beforeAllSubcases(t => {
     const info = kTextureFormatInfo[t.params.format];
+    t.skipIfTextureFormatNotSupported(t.params.format);
     t.selectDeviceOrSkipTestCase(info.feature);
   })
   .fn(t => {
-    const {
-      valueToCoordinate,
-      coordinateToTest,
-      format,
-      method,
-      depthOrArrayLayers,
-      dimension,
-    } = t.params;
+    const { valueToCoordinate, coordinateToTest, format, method, depthOrArrayLayers, dimension } =
+      t.params;
     const info = kTextureFormatInfo[format];
     const size = { width: 0, height: 0, depthOrArrayLayers };
     const origin = { x: 0, y: 0, z: 0 };
@@ -420,6 +413,7 @@ Test that the copy size must be aligned to the texture's format's block size.
   )
   .beforeAllSubcases(t => {
     const info = kTextureFormatInfo[t.params.format];
+    t.skipIfTextureFormatNotSupported(t.params.format);
     t.selectDeviceOrSkipTestCase(info.feature);
   })
   .fn(t => {
@@ -444,7 +438,7 @@ Test that the copy size must be aligned to the texture's format's block size.
     const texture = t.createAlignedTexture(format, size, origin, dimension);
 
     const bytesPerRow = align(
-      Math.max(1, Math.ceil(size.width / info.blockWidth)) * info.bytesPerBlock,
+      Math.max(1, Math.ceil(size.width / info.blockWidth)) * info.color.bytes,
       256
     );
     const rowsPerImage = Math.ceil(size.height / info.blockHeight);
@@ -518,7 +512,7 @@ Test that the max corner of the copy rectangle (origin+copySize) must be inside 
       }
     }
 
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size: textureSize,
       dimension,
       mipLevelCount: dimension === '1d' ? 1 : 3,

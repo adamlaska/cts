@@ -1,15 +1,20 @@
-import { SkipTestCase } from '../../common/framework/fixture.js';
+import { SkipTestCase, TestCaseRecorder } from '../../common/framework/fixture.js';
 import { attemptGarbageCollection } from '../../common/util/collect_garbage.js';
-import { getGPU } from '../../common/util/navigator_gpu.js';
+import { getGPU, getDefaultRequestAdapterOptions } from '../../common/util/navigator_gpu.js';
 import {
   assert,
   raceWithRejectOnTimeout,
   assertReject,
   unreachable,
 } from '../../common/util/util.js';
-import { kLimitInfo, kLimits } from '../capability_info.js';
+import { getDefaultLimits, kLimits } from '../capability_info.js';
+
+// MUST_NOT_BE_IMPORTED_BY_DATA_CACHE
+// This file should not be transitively imported by .cache.ts files
 
 export interface DeviceProvider {
+  /** Adapter the device was created from. Cannot be reused; just for adapter info. */
+  readonly adapter: GPUAdapter;
   readonly device: GPUDevice;
   expectDeviceLost(reason: GPUDeviceLostReason): void;
 }
@@ -18,16 +23,50 @@ class TestFailedButDeviceReusable extends Error {}
 class FeaturesNotSupported extends Error {}
 export class TestOOMedShouldAttemptGC extends Error {}
 
+/**
+ * DescriptorModifier lets you supply a function to select a device
+ * based on the limits/features available from the adapter.
+ * Devices pooled based on a key and that key is derived before
+ * an adapter is requested. That means you select key without
+ * knowledge of what the adapter will provide. You do this by
+ * providing a keyModifier function that appends a suffix.
+ *
+ * For example: If your modifier adds all the limits you might
+ * choose 'maxLimits' are your suffix
+ *
+ * ```js
+ *   keyModifier(s: string) { return `${s}:maxLimits`; },
+ * ```
+ *
+ * If your modifier selects only `maxBindGroups` and `maxColorAttachments`
+ * then your suffix might be `maxBindGroups&maxColorAttachments`
+ *
+ * ```js
+ *   keyModifier(s: string) { return `${s}:maxBindGroups&maxColorAttachments`; },
+ * ```
+ */
+export type DescriptorModifier = {
+  keyModifier(baseKey: string): string;
+  descriptorModifier(
+    adapter: GPUAdapter,
+    desc: CanonicalDeviceDescriptor | undefined
+  ): CanonicalDeviceDescriptor;
+};
+
 export class DevicePool {
   private holders: 'uninitialized' | 'failed' | DescriptorToHolderMap = 'uninitialized';
 
   /** Acquire a device from the pool and begin the error scopes. */
-  async acquire(descriptor?: UncanonicalizedDeviceDescriptor): Promise<DeviceProvider> {
+  async acquire(
+    recorder: TestCaseRecorder,
+    descriptor: UncanonicalizedDeviceDescriptor | undefined,
+    descriptorModifier: DescriptorModifier | undefined
+  ): Promise<DeviceProvider> {
     let errorMessage = '';
     if (this.holders === 'uninitialized') {
       this.holders = new DescriptorToHolderMap();
       try {
-        await this.holders.getOrCreate(undefined);
+        await this.holders.getOrCreate(recorder, undefined, descriptorModifier);
       } catch (ex) {
         this.holders = 'failed';
         if (ex instanceof Error) {
@@ -41,7 +80,7 @@ export class DevicePool {
       `WebGPU device failed to initialize${errorMessage}; not retrying`
     );
 
-    const holder = await this.holders.getOrCreate(descriptor);
+    const holder = await this.holders.getOrCreate(recorder, descriptor, descriptorModifier);
 
     assert(holder.state === 'free', 'Device was in use on DevicePool.acquire');
     holder.state = 'acquired';
@@ -75,6 +114,8 @@ export class DevicePool {
         this.holders.delete(holder);
         if ('destroy' in holder.device) {
           holder.device.destroy();
+          // Wait for destruction (or actual device loss if any) to complete.
+          await holder.device.lost;
         }
 
         // Release the (hopefully only) ref to the GPUDevice.
@@ -132,9 +173,12 @@ class DescriptorToHolderMap {
    * Throws SkipTestCase if devices with this descriptor are unsupported.
    */
   async getOrCreate(
-    uncanonicalizedDescriptor: UncanonicalizedDeviceDescriptor | undefined
+    recorder: TestCaseRecorder,
+    uncanonicalizedDescriptor: UncanonicalizedDeviceDescriptor | undefined,
+    descriptorModifier: DescriptorModifier | undefined
   ): Promise<DeviceHolder> {
-    const [descriptor, key] = canonicalizeDescriptor(uncanonicalizedDescriptor);
+    const [descriptor, baseKey] = canonicalizeDescriptor(uncanonicalizedDescriptor);
+    const key = descriptorModifier?.keyModifier(baseKey) || baseKey;
     // Quick-reject descriptors that are known to be unsupported already.
     if (this.unsupported.has(key)) {
       throw new SkipTestCase(
@@ -156,7 +200,7 @@ class DescriptorToHolderMap {
     // No existing item was found; add a new one.
     let value;
     try {
-      value = await DeviceHolder.create(descriptor);
+      value = await DeviceHolder.create(recorder, descriptor, descriptorModifier);
     } catch (ex) {
       if (ex instanceof FeaturesNotSupported) {
         this.unsupported.add(key);
@@ -189,16 +233,8 @@ class DescriptorToHolderMap {
 export type UncanonicalizedDeviceDescriptor = {
   requiredFeatures?: Iterable<GPUFeatureName>;
   requiredLimits?: Record<string, GPUSize32>;
-  /** @deprecated this field cannot be used */
-  nonGuaranteedFeatures?: undefined;
-  /** @deprecated this field cannot be used */
-  nonGuaranteedLimits?: undefined;
-  /** @deprecated this field cannot be used */
-  extensions?: undefined;
-  /** @deprecated this field cannot be used */
-  features?: undefined;
 };
-type CanonicalDeviceDescriptor = Omit<
+export type CanonicalDeviceDescriptor = Omit<
   Required<GPUDeviceDescriptor>,
   'label' | 'nonGuaranteedFeatures' | 'nonGuaranteedLimits'
 >;
@@ -225,10 +261,16 @@ function canonicalizeDescriptor(
   /** Canonicalized version of the requested limits: in canonical order, with only values which are
    * specified _and_ non-default. */
   const limitsCanonicalized: Record<string, number> = {};
+  // MAINTENANCE_TODO: Remove cast when @webgpu/types includes compatibilityMode
+  const adapterOptions = getDefaultRequestAdapterOptions() as unknown as {
+    compatibilityMode?: boolean;
+  };
+  const featureLevel = adapterOptions?.compatibilityMode ? 'compatibility' : 'core';
+  const defaultLimits = getDefaultLimits(featureLevel);
   if (desc.requiredLimits) {
     for (const limit of kLimits) {
       const requestedValue = desc.requiredLimits[limit];
-      const defaultValue = kLimitInfo[limit].default;
+      const defaultValue = defaultLimits[limit].default;
       // Skip adding a limit to limitsCanonicalized if it is the same as the default.
       if (requestedValue !== undefined && requestedValue !== defaultValue) {
         limitsCanonicalized[limit] = requestedValue;
@@ -273,6 +315,8 @@ type DeviceHolderState = 'free' | 'acquired';
  * Holds a GPUDevice and tracks its state (free/acquired) and handles device loss.
  */
 class DeviceHolder implements DeviceProvider {
+  /** Adapter the device was created from. Cannot be reused; just for adapter info. */
+  readonly adapter: GPUAdapter;
   /** The device. Will be cleared during cleanup if there were unexpected errors. */
   private _device: GPUDevice | undefined;
   /** Whether the device is in use by a test or not. */
@@ -284,20 +328,30 @@ class DeviceHolder implements DeviceProvider {
 
   // Gets a device and creates a DeviceHolder.
   // If the device is lost, DeviceHolder.lost gets set.
-  static async create(descriptor: CanonicalDeviceDescriptor | undefined): Promise<DeviceHolder> {
-    const gpu = getGPU();
+  static async create(
+    recorder: TestCaseRecorder,
+    descriptor: CanonicalDeviceDescriptor | undefined,
+    descriptorModifier: DescriptorModifier | undefined
+  ): Promise<DeviceHolder> {
+    const gpu = getGPU(recorder);
     const adapter = await gpu.requestAdapter();
     assert(adapter !== null, 'requestAdapter returned null');
+    if (descriptorModifier) {
+      descriptor = descriptorModifier.descriptorModifier(adapter, descriptor);
+    }
     if (!supportsFeature(adapter, descriptor)) {
       throw new FeaturesNotSupported('One or more features are not supported');
     }
+    // No trackForCleanup because we plan to reuse the device for the next test.
+    // eslint-disable-next-line no-restricted-syntax
     const device = await adapter.requestDevice(descriptor);
     assert(device !== null, 'requestDevice returned null');
 
-    return new DeviceHolder(device);
+    return new DeviceHolder(adapter, device);
   }
 
-  private constructor(device: GPUDevice) {
+  private constructor(adapter: GPUAdapter, device: GPUDevice) {
+    this.adapter = adapter;
     this._device = device;
     void this._device.lost.then(ev => {
       this.lostInfo = ev;
@@ -312,8 +366,9 @@ class DeviceHolder implements DeviceProvider {
   /** Push error scopes that surround test execution. */
   beginTestScope(): void {
     assert(this.state === 'acquired');
-    this.device.pushErrorScope('out-of-memory');
     this.device.pushErrorScope('validation');
+    this.device.pushErrorScope('internal');
+    this.device.pushErrorScope('out-of-memory');
   }
 
   /** Mark the DeviceHolder as expecting a device loss when the test scope ends. */
@@ -341,6 +396,7 @@ class DeviceHolder implements DeviceProvider {
 
   private async attemptEndTestScope(): Promise<void> {
     let gpuValidationError: GPUError | null;
+    let gpuInternalError: GPUError | null;
     let gpuOutOfMemoryError: GPUError | null;
 
     // Submit to the queue to attempt to force a GPU flush.
@@ -348,7 +404,8 @@ class DeviceHolder implements DeviceProvider {
 
     try {
       // May reject if the device was lost.
-      [gpuValidationError, gpuOutOfMemoryError] = await Promise.all([
+      [gpuOutOfMemoryError, gpuInternalError, gpuValidationError] = await Promise.all([
+        this.device.popErrorScope(),
         this.device.popErrorScope(),
         this.device.popErrorScope(),
       ]);
@@ -362,22 +419,29 @@ class DeviceHolder implements DeviceProvider {
       await this.device.queue.onSubmittedWorkDone();
     }
 
-    await assertReject(
-      this.device.popErrorScope(),
-      'There was an extra error scope on the stack after a test'
-    );
+    await assertReject('OperationError', this.device.popErrorScope(), {
+      allowMissingStack: true,
+      message: 'There was an extra error scope on the stack after a test',
+    });
 
+    if (gpuOutOfMemoryError !== null) {
+      assert(gpuOutOfMemoryError instanceof GPUOutOfMemoryError);
+      // Don't allow the device to be reused; unexpected OOM could break the device.
+      throw new TestOOMedShouldAttemptGC('Unexpected out-of-memory error occurred');
+    }
+    if (gpuInternalError !== null) {
+      assert(gpuInternalError instanceof GPUInternalError);
+      // Allow the device to be reused.
+      throw new TestFailedButDeviceReusable(
+        `Unexpected internal error occurred: ${gpuInternalError.message}`
+      );
+    }
     if (gpuValidationError !== null) {
       assert(gpuValidationError instanceof GPUValidationError);
       // Allow the device to be reused.
       throw new TestFailedButDeviceReusable(
         `Unexpected validation error occurred: ${gpuValidationError.message}`
       );
-    }
-    if (gpuOutOfMemoryError !== null) {
-      assert(gpuOutOfMemoryError instanceof GPUOutOfMemoryError);
-      // Don't allow the device to be reused; unexpected OOM could break the device.
-      throw new TestOOMedShouldAttemptGC('Unexpected out-of-memory error occurred');
     }
   }
 

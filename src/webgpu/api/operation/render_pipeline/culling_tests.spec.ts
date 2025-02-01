@@ -5,7 +5,7 @@ Test all culling combinations of GPUFrontFace and GPUCullMode show the correct o
 `;
 
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
-import { kTextureFormatInfo, SizedTextureFormat } from '../../../capability_info.js';
+import { kTextureFormatInfo, SizedTextureFormat } from '../../../format_info.js';
 import { GPUTest, TextureTestMixin } from '../../../gpu_test.js';
 
 function faceIsCulled(face: 'cw' | 'ccw', frontFace: GPUFrontFace, cullMode: GPUCullMode): boolean {
@@ -140,7 +140,7 @@ g.test('culling')
     const size = 4;
     const format = 'rgba8unorm';
 
-    const texture = t.device.createTexture({
+    const texture = t.createTextureTracked({
       size: { width: size, height: size, depthOrArrayLayers: 1 },
       format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
@@ -151,7 +151,7 @@ g.test('culling')
     let depthStencilAttachment: GPURenderPassDepthStencilAttachment | undefined = undefined;
     let depthStencil: GPUDepthStencilState | undefined = undefined;
     if (depthStencilFormat) {
-      depthTexture = t.device.createTexture({
+      depthTexture = t.createTextureTracked({
         size: { width: size, height: size, depthOrArrayLayers: 1 },
         format: depthStencilFormat,
         usage: GPUTextureUsage.RENDER_ATTACHMENT,

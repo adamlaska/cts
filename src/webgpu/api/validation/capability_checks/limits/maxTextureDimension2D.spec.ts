@@ -1,27 +1,27 @@
 import { getGPU } from '../../../../../common/util/navigator_gpu.js';
 import { kAllCanvasTypes, createCanvas } from '../../../../util/create_elements.js';
 
-import { kLimitBaseParams, makeLimitTestGroup } from './limit_utils.js';
+import { kMaximumLimitBaseParams, makeLimitTestGroup } from './limit_utils.js';
 
 const limit = 'maxTextureDimension2D';
 export const { g, description } = makeLimitTestGroup(limit);
 
 g.test('createTexture,at_over')
   .desc(`Test using at and over ${limit} limit`)
-  .params(kLimitBaseParams)
+  .params(kMaximumLimitBaseParams)
   .fn(async t => {
     const { limitTest, testValueName } = t.params;
-    await t.testDeviceWithRequestedLimits(
+    await t.testDeviceWithRequestedMaximumLimits(
       limitTest,
       testValueName,
-      async ({ device, shouldError, testValue, actualLimit }) => {
+      async ({ shouldError, testValue, actualLimit }) => {
         for (let dimensionIndex = 0; dimensionIndex < 2; ++dimensionIndex) {
           const size = [1, 1, 1];
           size[dimensionIndex] = testValue;
 
           await t.testForValidationErrorWithPossibleOutOfMemoryError(
             () => {
-              const texture = device.createTexture({
+              const texture = t.createTextureTracked({
                 size,
                 format: 'rgba8unorm',
                 usage: GPUTextureUsage.TEXTURE_BINDING,
@@ -46,10 +46,10 @@ g.test('createTexture,at_over')
 
 g.test('configure,at_over')
   .desc(`Test using at and over ${limit} limit`)
-  .params(kLimitBaseParams.combine('canvasType', kAllCanvasTypes))
+  .params(kMaximumLimitBaseParams.combine('canvasType', kAllCanvasTypes))
   .fn(async t => {
     const { limitTest, testValueName, canvasType } = t.params;
-    await t.testDeviceWithRequestedLimits(
+    await t.testDeviceWithRequestedMaximumLimits(
       limitTest,
       testValueName,
       async ({ device, shouldError, testValue, actualLimit }) => {
@@ -59,7 +59,7 @@ g.test('configure,at_over')
 
           // This should not fail, even if the size is too large but it might fail
           // if we're in a worker and HTMLCanvasElement does not exist.
-          const canvas = createCanvas(t, canvasType, size[0], size[1])!;
+          const canvas = createCanvas(t, canvasType, size[0], size[1]);
           if (canvas) {
             const context = canvas.getContext('webgpu') as GPUCanvasContext;
             t.expect(!!context, 'should not fail to create context even if size is too large');
@@ -68,7 +68,7 @@ g.test('configure,at_over')
               () => {
                 context.configure({
                   device,
-                  format: getGPU().getPreferredCanvasFormat(),
+                  format: getGPU(t.rec).getPreferredCanvasFormat(),
                 });
               },
               shouldError,
@@ -82,10 +82,10 @@ g.test('configure,at_over')
 
 g.test('getCurrentTexture,at_over')
   .desc(`Test using at and over ${limit} limit`)
-  .params(kLimitBaseParams.combine('canvasType', kAllCanvasTypes))
+  .params(kMaximumLimitBaseParams.combine('canvasType', kAllCanvasTypes))
   .fn(async t => {
     const { limitTest, testValueName, canvasType } = t.params;
-    await t.testDeviceWithRequestedLimits(
+    await t.testDeviceWithRequestedMaximumLimits(
       limitTest,
       testValueName,
       async ({ device, shouldError, testValue, actualLimit }) => {
@@ -96,14 +96,14 @@ g.test('getCurrentTexture,at_over')
           // Start with a small size so configure will succeed.
           // This should not fail, even if the size is too large but it might fail
           // if we're in a worker and HTMLCanvasElement does not exist.
-          const canvas = createCanvas(t, canvasType, 1, 1)!;
+          const canvas = createCanvas(t, canvasType, 1, 1);
           if (canvas) {
             const context = canvas.getContext('webgpu') as GPUCanvasContext;
             t.expect(!!context, 'should not fail to create context even if size is too large');
 
             context.configure({
               device,
-              format: getGPU().getPreferredCanvasFormat(),
+              format: getGPU(t.rec).getPreferredCanvasFormat(),
             });
 
             if (canvas) {

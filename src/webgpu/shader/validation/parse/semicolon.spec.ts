@@ -27,6 +27,21 @@ g.test('after_enable')
     t.expectCompileResult(/* pass */ false, `enable f16`);
   });
 
+g.test('after_requires')
+  .desc(`Test that a semicolon must be placed after a requires directive.`)
+  .fn(t => {
+    t.skipIfLanguageFeatureNotSupported('readonly_and_readwrite_storage_textures');
+    t.expectCompileResult(/* pass */ true, `requires readonly_and_readwrite_storage_textures;`);
+    t.expectCompileResult(/* pass */ false, `requires readonly_and_readwrite_storage_textures`);
+  });
+
+g.test('after_diagnostic')
+  .desc(`Test that a semicolon must be placed after a requires directive.`)
+  .fn(t => {
+    t.expectCompileResult(/* pass */ true, `diagnostic(info, derivative_uniformity);`);
+    t.expectCompileResult(/* pass */ false, `diagnostic(info, derivative_uniformity)`);
+  });
+
 g.test('after_struct_decl')
   .desc(`Test that a semicolon can be placed after an struct declaration.`)
   .fn(t => {
@@ -51,8 +66,8 @@ g.test('after_func_decl')
 g.test('after_type_alias_decl')
   .desc(`Test that a semicolon must be placed after an type alias declaration.`)
   .fn(t => {
-    t.expectCompileResult(/* pass */ true, `type T = i32;`);
-    t.expectCompileResult(/* pass */ false, `type T = i32`);
+    t.expectCompileResult(/* pass */ true, `alias T = i32;`);
+    t.expectCompileResult(/* pass */ false, `alias T = i32`);
   });
 
 g.test('after_return')

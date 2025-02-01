@@ -4,11 +4,11 @@ Test texture views can reinterpret the format of the original texture.
 
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
 import {
-  EncodableTextureFormat,
   kRenderableColorTextureFormats,
   kRegularTextureFormats,
   viewCompatible,
-} from '../../../capability_info.js';
+  EncodableTextureFormat,
+} from '../../../format_info.js';
 import { GPUTest, TextureTestMixin } from '../../../gpu_test.js';
 import { TexelView } from '../../../util/texture/texel_view.js';
 
@@ -100,9 +100,16 @@ g.test('texture_binding')
       .combine('format', kRegularTextureFormats)
       .combine('viewFormat', kRegularTextureFormats)
       .filter(
-        ({ format, viewFormat }) => format !== viewFormat && viewCompatible(format, viewFormat)
+        ({ format, viewFormat }) =>
+          format !== viewFormat && viewCompatible(false, format, viewFormat)
       )
   )
+  .beforeAllSubcases(t => {
+    const { format, viewFormat } = t.params;
+    t.skipIfTextureFormatNotSupported(format, viewFormat);
+    // Compatibility mode does not support format reinterpretation.
+    t.skipIf(t.isCompatibility);
+  })
   .fn(t => {
     const { format, viewFormat } = t.params;
 
@@ -141,13 +148,11 @@ g.test('texture_binding')
     });
 
     // Create an rgba8unorm output texture.
-    const outputTexture = t.trackForCleanup(
-      t.device.createTexture({
-        format: 'rgba8unorm',
-        size: [kTextureSize, kTextureSize],
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
-      })
-    );
+    const outputTexture = t.createTextureTracked({
+      format: 'rgba8unorm',
+      size: [kTextureSize, kTextureSize],
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
+    });
 
     // Execute a compute pass to load data from the reinterpreted view and
     // write out to the rgba8unorm texture.
@@ -196,10 +201,17 @@ in view format and match in base format.`
       .combine('format', kRenderableColorTextureFormats)
       .combine('viewFormat', kRenderableColorTextureFormats)
       .filter(
-        ({ format, viewFormat }) => format !== viewFormat && viewCompatible(format, viewFormat)
+        ({ format, viewFormat }) =>
+          format !== viewFormat && viewCompatible(false, format, viewFormat)
       )
       .combine('sampleCount', [1, 4])
   )
+  .beforeAllSubcases(t => {
+    const { format, viewFormat } = t.params;
+    t.skipIfTextureFormatNotSupported(format, viewFormat);
+    // Compatibility mode does not support format reinterpretation.
+    t.skipIf(t.isCompatibility);
+  })
   .fn(t => {
     const { format, viewFormat, sampleCount } = t.params;
 
@@ -207,29 +219,25 @@ in view format and match in base format.`
     const inputTexelView = makeInputTexelView(format);
 
     // Create the renderTexture as |format|.
-    const renderTexture = t.trackForCleanup(
-      t.device.createTexture({
-        format,
-        size: [kTextureSize, kTextureSize],
-        usage:
-          GPUTextureUsage.RENDER_ATTACHMENT |
-          (sampleCount > 1 ? GPUTextureUsage.TEXTURE_BINDING : GPUTextureUsage.COPY_SRC),
-        viewFormats: [viewFormat],
-        sampleCount,
-      })
-    );
+    const renderTexture = t.createTextureTracked({
+      format,
+      size: [kTextureSize, kTextureSize],
+      usage:
+        GPUTextureUsage.RENDER_ATTACHMENT |
+        (sampleCount > 1 ? GPUTextureUsage.TEXTURE_BINDING : GPUTextureUsage.COPY_SRC),
+      viewFormats: [viewFormat],
+      sampleCount,
+    });
 
     const resolveTexture =
       sampleCount === 1
         ? undefined
-        : t.trackForCleanup(
-            t.device.createTexture({
-              format,
-              size: [kTextureSize, kTextureSize],
-              usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
-              viewFormats: [viewFormat],
-            })
-          );
+        : t.createTextureTracked({
+            format,
+            size: [kTextureSize, kTextureSize],
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+            viewFormats: [viewFormat],
+          });
 
     // Create the sample source with the contents of the input texel view.
     // We will sample this texture into |renderTexture|. It uses the same format to keep the same
@@ -281,13 +289,11 @@ in view format and match in base format.`
     // If the render target is multisampled, we'll manually resolve it to check
     // the contents.
     const singleSampleRenderTexture = resolveTexture
-      ? t.trackForCleanup(
-          t.device.createTexture({
-            format,
-            size: [kTextureSize, kTextureSize],
-            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
-          })
-        )
+      ? t.createTextureTracked({
+          format,
+          size: [kTextureSize, kTextureSize],
+          usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+        })
       : renderTexture;
 
     if (resolveTexture) {
