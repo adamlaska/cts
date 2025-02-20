@@ -3,25 +3,23 @@ Tests for GPUCanvasContext.configure.
 
 TODO:
 - Test colorSpace
-- Test viewFormats
+- Test toneMapping
 `;
 
 import { makeTestGroup } from '../../../common/framework/test_group.js';
 import { assert } from '../../../common/util/util.js';
+import { kCanvasTextureFormats, kTextureUsages } from '../../capability_info.js';
+import { GPUConst } from '../../constants.js';
 import {
   kAllTextureFormats,
-  kCanvasTextureFormats,
-  kTextureUsages,
-  filterFormatsByFeature,
   kFeaturesForFormats,
-  kTextureFormats,
-  viewCompatible,
-} from '../../capability_info.js';
-import { GPUConst } from '../../constants.js';
-import { GPUTest } from '../../gpu_test.js';
+  filterFormatsByFeature,
+  viewCompatibleDeprecated,
+} from '../../format_info.js';
+import { AllFeaturesMaxLimitsGPUTest } from '../../gpu_test.js';
 import { kAllCanvasTypes, createCanvas } from '../../util/create_elements.js';
 
-export const g = makeTestGroup(GPUTest);
+export const g = makeTestGroup(AllFeaturesMaxLimitsGPUTest);
 
 g.test('defaults')
   .desc(
@@ -43,6 +41,16 @@ g.test('defaults')
       device: t.device,
       format: 'rgba8unorm',
     });
+
+    const configuration = ctx.getConfiguration();
+    assert(configuration !== null);
+    t.expect(configuration.device === t.device);
+    t.expect(configuration.format === 'rgba8unorm');
+    t.expect(configuration.usage === GPUTextureUsage.RENDER_ATTACHMENT);
+    t.expect(configuration.viewFormats.length === 0);
+    t.expect(configuration.colorSpace === 'srgb');
+    t.expect(configuration.toneMapping?.mode === 'standard');
+    t.expect(configuration.alphaMode === 'opaque');
 
     const currentTexture = ctx.getCurrentTexture();
     t.expect(currentTexture.format === 'rgba8unorm');
@@ -71,15 +79,18 @@ g.test('device')
     const ctx = canvas.getContext('webgpu');
     assert(ctx instanceof GPUCanvasContext, 'Failed to get WebGPU context from canvas');
 
-    // Calling configure without a device should throw.
-    t.shouldThrow(true, () => {
+    // getConfiguration returns null before configure.
+    t.expect(ctx.getConfiguration() === null);
+
+    // Calling configure without a device should throw a TypeError.
+    t.shouldThrow('TypeError', () => {
       ctx.configure({
         format: 'rgba8unorm',
       } as GPUCanvasConfiguration);
     });
 
-    // Device is not configured, so getCurrentTexture will throw.
-    t.shouldThrow(true, () => {
+    // Device is not configured, so getCurrentTexture will throw an InvalidStateError.
+    t.shouldThrow('InvalidStateError', () => {
       ctx.getCurrentTexture();
     });
 
@@ -87,23 +98,50 @@ g.test('device')
     ctx.configure({
       device: t.device,
       format: 'rgba8unorm',
+      alphaMode: 'opaque',
     });
+
+    // getConfiguration will succeed after configure.
+    const configuration = ctx.getConfiguration();
+    assert(configuration !== null);
+    t.expect(configuration.device === t.device);
+    t.expect(configuration.format === 'rgba8unorm');
+    t.expect(configuration.usage === GPUTextureUsage.RENDER_ATTACHMENT);
+    t.expect(configuration.viewFormats.length === 0);
+    t.expect(configuration.colorSpace === 'srgb');
+    t.expect(configuration.toneMapping?.mode === 'standard');
+    t.expect(configuration.alphaMode === 'opaque');
 
     // getCurrentTexture will succeed with a valid device.
     ctx.getCurrentTexture();
 
     // Unconfiguring should cause the device to be cleared.
     ctx.unconfigure();
-    t.shouldThrow(true, () => {
+    t.shouldThrow('InvalidStateError', () => {
       ctx.getCurrentTexture();
     });
+
+    // getConfiguration returns null after unconfigure.
+    t.expect(ctx.getConfiguration() === null);
 
     // Should be able to successfully configure again after unconfiguring.
     ctx.configure({
       device: t.device,
       format: 'rgba8unorm',
+      alphaMode: 'premultiplied',
     });
     ctx.getCurrentTexture();
+
+    // getConfiguration will succeed after configure.
+    const newConfiguration = ctx.getConfiguration();
+    assert(newConfiguration !== null);
+    t.expect(newConfiguration.device === t.device);
+    t.expect(newConfiguration.format === 'rgba8unorm');
+    t.expect(newConfiguration.usage === GPUTextureUsage.RENDER_ATTACHMENT);
+    t.expect(newConfiguration.viewFormats.length === 0);
+    t.expect(newConfiguration.colorSpace === 'srgb');
+    t.expect(newConfiguration.toneMapping?.mode === 'standard');
+    t.expect(newConfiguration.alphaMode === 'premultiplied');
   });
 
 g.test('format')
@@ -135,18 +173,21 @@ g.test('format')
       }
     }
 
-    t.expectValidationError(() => {
+    if (validFormat) {
       ctx.configure({
         device: t.device,
         format,
       });
-    }, !validFormat);
-
-    t.expectValidationError(() => {
-      // Should always return a texture, whether the configured format was valid or not.
-      const currentTexture = ctx.getCurrentTexture();
-      t.expect(currentTexture instanceof GPUTexture);
-    }, !validFormat);
+      const configuration = ctx.getConfiguration();
+      t.expect(configuration!.format === format);
+    } else {
+      t.shouldThrow('TypeError', () => {
+        ctx.configure({
+          device: t.device,
+          format,
+        });
+      });
+    }
   });
 
 g.test('usage')
@@ -159,7 +200,7 @@ g.test('usage')
     u //
       .combine('canvasType', kAllCanvasTypes)
       .beginSubcases()
-      .expand('usage', p => {
+      .expand('usage', () => {
         const usageSet = new Set<number>();
         for (const usage0 of kTextureUsages) {
           for (const usage1 of kTextureUsages) {
@@ -171,6 +212,7 @@ g.test('usage')
   )
   .fn(t => {
     const { canvasType, usage } = t.params;
+
     const canvas = createCanvas(t, canvasType, 2, 2);
     const ctx = canvas.getContext('webgpu');
     assert(ctx instanceof GPUCanvasContext, 'Failed to get WebGPU context from canvas');
@@ -180,6 +222,9 @@ g.test('usage')
       format: 'rgba8unorm',
       usage,
     });
+
+    const configuration = ctx.getConfiguration();
+    t.expect(configuration!.usage === usage);
 
     const currentTexture = ctx.getCurrentTexture();
     t.expect(currentTexture instanceof GPUTexture);
@@ -225,7 +270,13 @@ g.test('usage')
       });
     }
 
-    if (usage & GPUConst.TextureUsage.STORAGE_BINDING) {
+    const canUseStorageTextureInFragmentShader =
+      !t.isCompatibility || t.device.limits.maxStorageTexturesInFragmentStage! > 0;
+
+    if (
+      (usage & GPUConst.TextureUsage.STORAGE_BINDING) !== 0 &&
+      canUseStorageTextureInFragmentShader
+    ) {
       const bgl = t.device.createBindGroupLayout({
         entries: [
           {
@@ -255,7 +306,7 @@ g.test('usage')
 
     if (usage & GPUConst.TextureUsage.COPY_SRC) {
       const size = [currentTexture.width, currentTexture.height, 1];
-      const dstTexture = t.device.createTexture({
+      const dstTexture = t.createTextureTracked({
         format: currentTexture.format,
         usage: GPUTextureUsage.COPY_DST,
         size,
@@ -290,6 +341,9 @@ g.test('alpha_mode')
       format: 'rgba8unorm',
       alphaMode,
     });
+
+    const configuration = ctx.getConfiguration();
+    t.expect(configuration!.alphaMode === alphaMode);
 
     const currentTexture = ctx.getCurrentTexture();
     t.expect(currentTexture instanceof GPUTexture);
@@ -388,7 +442,7 @@ g.test('viewFormats')
       .combine('viewFormatFeature', kFeaturesForFormats)
       .beginSubcases()
       .expand('viewFormat', ({ viewFormatFeature }) =>
-        filterFormatsByFeature(viewFormatFeature, kTextureFormats)
+        filterFormatsByFeature(viewFormatFeature, kAllTextureFormats)
       )
   )
   .beforeAllSubcases(t => {
@@ -396,11 +450,14 @@ g.test('viewFormats')
   })
   .fn(t => {
     const { canvasType, format, viewFormat } = t.params;
+
+    t.skipIfTextureFormatNotSupportedDeprecated(viewFormat);
+
     const canvas = createCanvas(t, canvasType, 1, 1);
     const ctx = canvas.getContext('webgpu');
     assert(ctx instanceof GPUCanvasContext, 'Failed to get WebGPU context from canvas');
 
-    const compatible = viewCompatible(format, viewFormat);
+    const compatible = viewCompatibleDeprecated(t.isCompatibility, format, viewFormat);
 
     // Test configure() produces an error if the formats aren't compatible.
     t.expectValidationError(() => {
@@ -410,6 +467,9 @@ g.test('viewFormats')
         viewFormats: [viewFormat],
       });
     }, !compatible);
+
+    const viewFormats = ctx.getConfiguration()!.viewFormats;
+    t.expect(viewFormats[0] === viewFormat);
 
     // Likewise for getCurrentTexture().
     let currentTexture: GPUTexture;

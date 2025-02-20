@@ -1,9 +1,11 @@
 import { assert, ErrorWithExtra, unreachable } from '../../../common/util/util.js';
-import { EncodableTextureFormat, kTextureFormatInfo } from '../../capability_info.js';
-import { GPUTest } from '../../gpu_test.js';
-import { generatePrettyTable } from '../pretty_diff_tables.js';
+import { kTextureFormatInfo, EncodableTextureFormat } from '../../format_info.js';
+import { GPUTestBase } from '../../gpu_test.js';
+import { numbersApproximatelyEqual } from '../conversion.js';
+import { generatePrettyTable, numericToStringBuilder } from '../pretty_diff_tables.js';
 import { reifyExtent3D, reifyOrigin3D } from '../unions.js';
 
+import { fullSubrectCoordinates } from './base.js';
 import { getTextureSubCopyLayout } from './layout.js';
 import { kTexelRepresentationInfo, PerTexelComponent, TexelComponent } from './texel_data.js';
 import { TexelView } from './texel_view.js';
@@ -158,14 +160,14 @@ function comparePerComponent(
     const act = actual[k]!;
     const exp = expected[k];
     if (exp === undefined) return false;
-    return Math.abs(act - exp) <= maxDiff;
+    return numbersApproximatelyEqual(act, exp, maxDiff);
   });
 }
 
 /** Create a new mappable GPUBuffer, and copy a subrectangle of GPUTexture data into it. */
 function createTextureCopyForMapRead(
-  t: GPUTest,
-  source: GPUImageCopyTexture,
+  t: GPUTestBase,
+  source: GPUTexelCopyTextureInfo,
   copySize: GPUExtent3D,
   { format }: { format: EncodableTextureFormat }
 ): { buffer: GPUBuffer; bytesPerRow: number; rowsPerImage: number } {
@@ -173,11 +175,10 @@ function createTextureCopyForMapRead(
     aspect: source.aspect,
   });
 
-  const buffer = t.device.createBuffer({
+  const buffer = t.createBufferTracked({
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     size: byteLength,
   });
-  t.trackForCleanup(buffer);
 
   const cmd = t.device.createCommandEncoder();
   cmd.copyTextureToBuffer(source, { buffer, bytesPerRow, rowsPerImage }, copySize);
@@ -186,20 +187,7 @@ function createTextureCopyForMapRead(
   return { buffer, bytesPerRow, rowsPerImage };
 }
 
-function* fullSubrectCoordinates(
-  subrectOrigin: Required<GPUOrigin3DDict>,
-  subrectSize: Required<GPUExtent3DDict>
-): Generator<Required<GPUOrigin3DDict>> {
-  for (let z = subrectOrigin.z; z < subrectOrigin.z + subrectSize.depthOrArrayLayers; ++z) {
-    for (let y = subrectOrigin.y; y < subrectOrigin.y + subrectSize.height; ++y) {
-      for (let x = subrectOrigin.x; x < subrectOrigin.x + subrectSize.width; ++x) {
-        yield { x, y, z };
-      }
-    }
-  }
-}
-
-function findFailedPixels(
+export function findFailedPixels(
   format: EncodableTextureFormat,
   subrectOrigin: Required<GPUOrigin3DDict>,
   subrectSize: Required<GPUExtent3DDict>,
@@ -234,11 +222,13 @@ function findFailedPixels(
 
   const info = kTextureFormatInfo[format];
   const repr = kTexelRepresentationInfo[format];
-
-  const integerSampleType = info.sampleType === 'uint' || info.sampleType === 'sint';
-  const numberToString = integerSampleType
-    ? (n: number) => n.toFixed()
-    : (n: number) => n.toPrecision(6);
+  // MAINTENANCE_TODO: Print depth-stencil formats as float+int instead of float+float.
+  const printAsInteger = info.color
+    ? // For color, pick the type based on the format type
+      ['uint', 'sint'].includes(info.color.type)
+    : // Print depth as "float", depth-stencil as "float,float", stencil as "int".
+      !info.depth;
+  const numericToString = numericToStringBuilder(printAsInteger);
 
   const componentOrderStr = repr.componentOrder.join(',') + ':';
 
@@ -256,14 +246,14 @@ function findFailedPixels(
     yield* [' act. colors', '==', componentOrderStr];
     for (const coords of failedPixels) {
       const pixel = actTexelView.color(coords);
-      yield `${repr.componentOrder.map(ch => numberToString(pixel[ch]!)).join(',')}`;
+      yield `${repr.componentOrder.map(ch => numericToString(pixel[ch]!)).join(',')}`;
     }
   })();
   const printExpectedColors = (function* () {
     yield* [' exp. colors', '==', componentOrderStr];
     for (const coords of failedPixels) {
       const pixel = expTexelView.color(coords);
-      yield `${repr.componentOrder.map(ch => numberToString(pixel[ch]!)).join(',')}`;
+      yield `${repr.componentOrder.map(ch => numericToString(pixel[ch]!)).join(',')}`;
     }
   })();
   const printActualULPs = (function* () {
@@ -283,7 +273,7 @@ function findFailedPixels(
 
   const opts = {
     fillToWidth: 120,
-    numberToString,
+    numericToString,
   };
   return `\
  between ${lowerCorner} and ${upperCorner} inclusive:
@@ -307,8 +297,8 @@ ${generatePrettyTable(opts, [
  * subnormal numbers (where ULP is defined for float, normalized, and integer formats).
  */
 export async function textureContentIsOKByT2B(
-  t: GPUTest,
-  source: GPUImageCopyTexture,
+  t: GPUTestBase,
+  source: GPUTexelCopyTextureInfo,
   copySize_: GPUExtent3D,
   { expTexelView }: { expTexelView: TexelView },
   texelCompareOptions: TexelCompareOptions,

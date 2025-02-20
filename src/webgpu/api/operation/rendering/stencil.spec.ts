@@ -5,10 +5,10 @@ Test related to stencil states, stencil op, compare func, etc.
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
 import { TypedArrayBufferView } from '../../../../common/util/util.js';
 import {
-  DepthStencilFormat,
   kDepthStencilFormats,
   kTextureFormatInfo,
-} from '../../../capability_info.js';
+  DepthStencilFormat,
+} from '../../../format_info.js';
 import { GPUTest, TextureTestMixin } from '../../../gpu_test.js';
 import { TexelView } from '../../../util/texture/texel_view.js';
 
@@ -128,28 +128,25 @@ class StencilTest extends TextureTestMixin(GPUTest) {
     isSingleEncoderMultiplePass: boolean = false
   ) {
     const renderTargetFormat = 'rgba8unorm';
-    const renderTarget = this.trackForCleanup(
-      this.device.createTexture({
-        format: renderTargetFormat,
-        size: { width: 1, height: 1, depthOrArrayLayers: 1 },
-        usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
-      })
-    );
+    const renderTarget = this.createTextureTracked({
+      format: renderTargetFormat,
+      size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
 
-    const depthTexture = this.trackForCleanup(
-      this.device.createTexture({
-        size: { width: 1, height: 1, depthOrArrayLayers: 1 },
-        format: depthStencilFormat,
-        sampleCount: 1,
-        mipLevelCount: 1,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
-      })
-    );
+    const depthTexture = this.createTextureTracked({
+      size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+      format: depthStencilFormat,
+      sampleCount: 1,
+      mipLevelCount: 1,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+    });
 
+    const hasDepth = kTextureFormatInfo[depthStencilFormat].depth;
     const depthStencilAttachment: GPURenderPassDepthStencilAttachment = {
       view: depthTexture.createView(),
-      depthLoadOp: 'load',
-      depthStoreOp: 'store',
+      depthLoadOp: hasDepth ? 'load' : undefined,
+      depthStoreOp: hasDepth ? 'store' : undefined,
       stencilLoadOp: 'load',
       stencilStoreOp: 'store',
     };
@@ -159,8 +156,8 @@ class StencilTest extends TextureTestMixin(GPUTest) {
       colorAttachments: [
         {
           view: renderTarget.createView(),
-          storeOp: 'store',
           loadOp: 'load',
+          storeOp: 'store',
         },
       ],
       depthStencilAttachment,
@@ -178,8 +175,8 @@ class StencilTest extends TextureTestMixin(GPUTest) {
           colorAttachments: [
             {
               view: renderTarget.createView(),
-              storeOp: 'store',
               loadOp: 'load',
+              storeOp: 'store',
             },
           ],
           depthStencilAttachment,
@@ -212,7 +209,7 @@ class StencilTest extends TextureTestMixin(GPUTest) {
       B: expectedColor[2],
       A: expectedColor[3],
     };
-    const expTexelView = TexelView.fromTexelsAsColors(renderTargetFormat, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(renderTargetFormat, _coords => expColor);
     this.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [1, 1]);
   }
 
@@ -552,14 +549,20 @@ g.test('stencil_reference_initialized')
       passOp: 'keep',
     } as const;
 
+    const hasDepth = !!kTextureFormatInfo[format].depth;
+
     const baseState = {
       format,
+      depthWriteEnabled: hasDepth,
+      depthCompare: 'always',
       stencilFront: baseStencilState,
       stencilBack: baseStencilState,
     } as const;
 
     const testState = {
       format,
+      depthWriteEnabled: hasDepth,
+      depthCompare: 'always',
       stencilFront: testStencilState,
       stencilBack: testStencilState,
     } as const;

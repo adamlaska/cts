@@ -11,13 +11,13 @@ TODO: merge these notes and implement.
 `;
 
 import { makeTestGroup } from '../../../../../common/framework/test_group.js';
-import { range, unreachable } from '../../../../../common/util/util.js';
+import { makeValueTestVariant, range, unreachable } from '../../../../../common/util/util.js';
 import {
   kBufferBindingTypes,
   kMinDynamicBufferOffsetAlignment,
-  kLimitInfo,
 } from '../../../../capability_info.js';
-import { kResourceStates, ResourceState } from '../../../../gpu_test.js';
+import { GPUConst } from '../../../../constants.js';
+import { kResourceStates, MaxLimitsTestMixin, ResourceState } from '../../../../gpu_test.js';
 import {
   kProgrammableEncoderTypes,
   ProgrammableEncoderType,
@@ -54,7 +54,7 @@ class F extends ValidationTest {
         return {
           buffer: this.createBufferWithState(state, {
             size: 4,
-            usage: GPUBufferUsage.STORAGE,
+            usage: GPUBufferUsage.UNIFORM,
           }),
         };
       default:
@@ -81,7 +81,7 @@ class F extends ValidationTest {
       entries: indices.map(binding => ({
         binding,
         visibility: this.encoderTypeToStageFlag(encoderType),
-        ...(resourceType === 'buffer' ? { buffer: { type: 'storage' } } : { texture: {} }),
+        ...(resourceType === 'buffer' ? { buffer: { type: 'uniform' } } : { texture: {} }),
       })),
     });
     const bindGroup = this.device.createBindGroup({
@@ -102,7 +102,7 @@ class F extends ValidationTest {
   }
 }
 
-export const g = makeTestGroup(F);
+export const g = makeTestGroup(MaxLimitsTestMixin(F));
 
 g.test('state_and_binding_index')
   .desc('Tests that setBindGroup correctly handles {valid, invalid, destroyed} bindGroups.')
@@ -151,17 +151,19 @@ g.test('bind_group,device_mismatch')
     const { encoderType, useU32Array, mismatched } = t.params;
     const sourceDevice = mismatched ? t.mismatchedDevice : t.device;
 
-    const buffer = sourceDevice.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE,
-    });
+    const buffer = t.trackForCleanup(
+      sourceDevice.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.UNIFORM,
+      })
+    );
 
     const layout = sourceDevice.createBindGroupLayout({
       entries: [
         {
           binding: 0,
           visibility: t.encoderTypeToStageFlag(encoderType),
-          buffer: { type: 'storage', hasDynamicOffset: useU32Array },
+          buffer: { type: 'uniform', hasDynamicOffset: useU32Array },
         },
       ],
     });
@@ -223,15 +225,28 @@ g.test('dynamic_offsets_match_expectations_in_pass_encoder')
         { dynamicOffsets: [0, 0xffffffff], _success: false },
       ])
       .combine('useU32array', [false, true])
+      .beginSubcases()
+      .combine('visibility', [
+        GPUConst.ShaderStage.COMPUTE,
+        GPUConst.ShaderStage.COMPUTE | GPUConst.ShaderStage.FRAGMENT,
+      ] as const)
+      .combine('useStorage', [false, true] as const)
   )
   .fn(t => {
+    const { visibility, useStorage } = t.params;
+    t.skipIf(
+      t.isCompatibility &&
+        (visibility & GPUShaderStage.FRAGMENT) !== 0 &&
+        !(t.device.limits.maxStorageBuffersInFragmentStage! >= 1),
+      `maxStorageBuffersInFragmentStage${t.device.limits.maxStorageBuffersInFragmentStage} < 1`
+    );
     const kBindingSize = 12;
 
     const bindGroupLayout = t.device.createBindGroupLayout({
       entries: [
         {
           binding: 0,
-          visibility: GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+          visibility,
           buffer: {
             type: 'uniform',
             hasDynamicOffset: true,
@@ -239,23 +254,23 @@ g.test('dynamic_offsets_match_expectations_in_pass_encoder')
         },
         {
           binding: 1,
-          visibility: GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+          visibility,
           buffer: {
-            type: 'storage',
+            type: useStorage ? 'storage' : 'uniform',
             hasDynamicOffset: true,
           },
         },
       ],
     });
 
-    const uniformBuffer = t.device.createBuffer({
+    const uniformBuffer = t.createBufferTracked({
       size: 2 * kMinDynamicBufferOffsetAlignment + 8,
       usage: GPUBufferUsage.UNIFORM,
     });
 
-    const storageBuffer = t.device.createBuffer({
+    const storageOrUniformBuffer = t.createBufferTracked({
       size: 2 * kMinDynamicBufferOffsetAlignment + 8,
-      usage: GPUBufferUsage.STORAGE,
+      usage: useStorage ? GPUBufferUsage.STORAGE : GPUBufferUsage.UNIFORM,
     });
 
     const bindGroup = t.device.createBindGroup({
@@ -271,7 +286,7 @@ g.test('dynamic_offsets_match_expectations_in_pass_encoder')
         {
           binding: 1,
           resource: {
-            buffer: storageBuffer,
+            buffer: storageOrUniformBuffer,
             size: kBindingSize,
           },
         },
@@ -334,7 +349,7 @@ g.test('u32array_start_and_length')
         binding: i,
         visibility: GPUShaderStage.FRAGMENT,
         buffer: {
-          type: 'storage',
+          type: 'uniform',
           hasDynamicOffset: true,
         },
       })),
@@ -347,7 +362,7 @@ g.test('u32array_start_and_length')
         resource: {
           buffer: t.createBufferWithState('valid', {
             size: kBindingSize,
-            usage: GPUBufferUsage.STORAGE,
+            usage: GPUBufferUsage.UNIFORM,
           }),
           size: kBindingSize,
         },
@@ -389,27 +404,23 @@ g.test('buffer_dynamic_offsets')
       .combine('type', kBufferBindingTypes)
       .combine('encoderType', kProgrammableEncoderTypes)
       .beginSubcases()
-      .expand('dynamicOffset', ({ type }) =>
-        type === 'uniform'
-          ? [
-              kLimitInfo.minUniformBufferOffsetAlignment.default,
-              kLimitInfo.minUniformBufferOffsetAlignment.default * 0.5,
-              kLimitInfo.minUniformBufferOffsetAlignment.default * 1.5,
-              kLimitInfo.minUniformBufferOffsetAlignment.default * 2,
-              kLimitInfo.minUniformBufferOffsetAlignment.default + 2,
-            ]
-          : [
-              kLimitInfo.minStorageBufferOffsetAlignment.default,
-              kLimitInfo.minStorageBufferOffsetAlignment.default * 0.5,
-              kLimitInfo.minStorageBufferOffsetAlignment.default * 1.5,
-              kLimitInfo.minStorageBufferOffsetAlignment.default * 2,
-              kLimitInfo.minStorageBufferOffsetAlignment.default + 2,
-            ]
-      )
+      .combine('dynamicOffsetVariant', [
+        { mult: 1, add: 0 },
+        { mult: 0.5, add: 0 },
+        { mult: 1.5, add: 0 },
+        { mult: 2, add: 0 },
+        { mult: 1, add: 2 },
+      ])
   )
   .fn(t => {
-    const { type, dynamicOffset, encoderType } = t.params;
+    const { type, dynamicOffsetVariant, encoderType } = t.params;
     const kBindingSize = 12;
+
+    const minAlignment =
+      t.device.limits[
+        type === 'uniform' ? 'minUniformBufferOffsetAlignment' : 'minStorageBufferOffsetAlignment'
+      ];
+    const dynamicOffset = makeValueTestVariant(minAlignment, dynamicOffsetVariant);
 
     const bindGroupLayout = t.device.createBindGroupLayout({
       entries: [
@@ -421,16 +432,10 @@ g.test('buffer_dynamic_offsets')
       ],
     });
 
-    let usage, isValid;
-    if (type === 'uniform') {
-      usage = GPUBufferUsage.UNIFORM;
-      isValid = dynamicOffset % kLimitInfo.minUniformBufferOffsetAlignment.default === 0;
-    } else {
-      usage = GPUBufferUsage.STORAGE;
-      isValid = dynamicOffset % kLimitInfo.minStorageBufferOffsetAlignment.default === 0;
-    }
+    const usage = type === 'uniform' ? GPUBufferUsage.UNIFORM : GPUBufferUsage.STORAGE;
+    const isValid = dynamicOffset % minAlignment === 0;
 
-    const buffer = t.device.createBuffer({
+    const buffer = t.createBufferTracked({
       size: 3 * kMinDynamicBufferOffsetAlignment,
       usage,
     });

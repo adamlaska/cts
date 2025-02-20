@@ -3,8 +3,10 @@ Tests for capability checking for features enabling optional texture formats.
 `;
 
 import { makeTestGroup } from '../../../../../common/framework/test_group.js';
+import { getGPU } from '../../../../../common/util/navigator_gpu.js';
 import { assert } from '../../../../../common/util/util.js';
-import { kAllTextureFormats, kTextureFormatInfo } from '../../../../capability_info.js';
+import { kCanvasTextureFormats } from '../../../../capability_info.js';
+import { kAllTextureFormats, kTextureFormatInfo } from '../../../../format_info.js';
 import { kAllCanvasTypes, createCanvas } from '../../../../util/create_elements.js';
 import { ValidationTest } from '../../validation_test.js';
 
@@ -37,7 +39,7 @@ g.test('texture_descriptor')
 
     const formatInfo = kTextureFormatInfo[format];
     t.shouldThrow(enable_required_feature ? false : 'TypeError', () => {
-      t.device.createTexture({
+      t.createTextureTracked({
         format,
         size: [formatInfo.blockWidth, formatInfo.blockHeight, 1] as const,
         usage: GPUTextureUsage.TEXTURE_BINDING,
@@ -68,7 +70,7 @@ g.test('texture_descriptor_view_formats')
 
     const formatInfo = kTextureFormatInfo[format];
     t.shouldThrow(enable_required_feature ? false : 'TypeError', () => {
-      t.device.createTexture({
+      t.createTextureTracked({
         format,
         size: [formatInfo.blockWidth, formatInfo.blockHeight, 1] as const,
         usage: GPUTextureUsage.TEXTURE_BINDING,
@@ -106,7 +108,7 @@ g.test('texture_view_descriptor')
     const textureFormat = enable_required_feature ? format : 'rgba8unorm';
 
     const formatInfo = kTextureFormatInfo[format];
-    const testTexture = t.device.createTexture({
+    const testTexture = t.createTextureTracked({
       format: textureFormat,
       size: [formatInfo.blockWidth, formatInfo.blockHeight, 1] as const,
       usage: GPUTextureUsage.TEXTURE_BINDING,
@@ -160,15 +162,15 @@ g.test('canvas_configuration')
       usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     };
 
-    if (enable_required_feature) {
-      t.expectValidationError(() => {
-        ctx.configure(canvasConf);
-      });
-    } else {
-      t.shouldThrow('TypeError', () => {
-        ctx.configure(canvasConf);
-      });
-    }
+    const expectedError =
+      enable_required_feature &&
+      (kCanvasTextureFormats as unknown as Array<GPUTextureFormat>).includes(format)
+        ? false
+        : 'TypeError';
+
+    t.shouldThrow(expectedError, () => {
+      ctx.configure(canvasConf);
+    });
   });
 
 g.test('canvas_configuration_view_formats')
@@ -233,7 +235,7 @@ g.test('storage_texture_binding_layout')
   .params(u =>
     u
       .combine('format', kOptionalTextureFormats)
-      .filter(t => kTextureFormatInfo[t.format].storage)
+      .filter(t => !!kTextureFormatInfo[t.format].color?.storage)
       .combine('enable_required_feature', [true, false])
   )
   .beforeAllSubcases(t => {
@@ -273,8 +275,9 @@ g.test('color_target_state')
   )
   .params(u =>
     u
+      .combine('isAsync', [false, true])
       .combine('format', kOptionalTextureFormats)
-      .filter(t => kTextureFormatInfo[t.format].renderable && kTextureFormatInfo[t.format].color)
+      .filter(t => !!kTextureFormatInfo[t.format].colorRender)
       .combine('enable_required_feature', [true, false])
   )
   .beforeAllSubcases(t => {
@@ -286,10 +289,12 @@ g.test('color_target_state')
     }
   })
   .fn(t => {
-    const { format, enable_required_feature } = t.params;
+    const { isAsync, format, enable_required_feature } = t.params;
 
-    t.shouldThrow(enable_required_feature ? false : 'TypeError', () => {
-      t.device.createRenderPipeline({
+    t.doCreateRenderPipelineTest(
+      isAsync,
+      enable_required_feature,
+      {
         layout: 'auto',
         vertex: {
           module: t.device.createShaderModule({
@@ -312,8 +317,9 @@ g.test('color_target_state')
           entryPoint: 'main',
           targets: [{ format }],
         },
-      });
-    });
+      },
+      'TypeError'
+    );
   });
 
 g.test('depth_stencil_state')
@@ -325,12 +331,9 @@ g.test('depth_stencil_state')
   )
   .params(u =>
     u
+      .combine('isAsync', [false, true])
       .combine('format', kOptionalTextureFormats)
-      .filter(
-        t =>
-          kTextureFormatInfo[t.format].renderable &&
-          (kTextureFormatInfo[t.format].depth || kTextureFormatInfo[t.format].stencil)
-      )
+      .filter(t => !!(kTextureFormatInfo[t.format].depth || kTextureFormatInfo[t.format].stencil))
       .combine('enable_required_feature', [true, false])
   )
   .beforeAllSubcases(t => {
@@ -342,10 +345,12 @@ g.test('depth_stencil_state')
     }
   })
   .fn(t => {
-    const { format, enable_required_feature } = t.params;
+    const { isAsync, format, enable_required_feature } = t.params;
 
-    t.shouldThrow(enable_required_feature ? false : 'TypeError', () => {
-      t.device.createRenderPipeline({
+    t.doCreateRenderPipelineTest(
+      isAsync,
+      enable_required_feature,
+      {
         layout: 'auto',
         vertex: {
           module: t.device.createShaderModule({
@@ -359,6 +364,8 @@ g.test('depth_stencil_state')
         },
         depthStencil: {
           format,
+          depthCompare: 'always',
+          depthWriteEnabled: false,
         },
         fragment: {
           module: t.device.createShaderModule({
@@ -371,8 +378,9 @@ g.test('depth_stencil_state')
           entryPoint: 'main',
           targets: [{ format: 'rgba8unorm' }],
         },
-      });
-    });
+      },
+      'TypeError'
+    );
   });
 
 g.test('render_bundle_encoder_descriptor_color_format')
@@ -387,7 +395,7 @@ g.test('render_bundle_encoder_descriptor_color_format')
   .params(u =>
     u
       .combine('format', kOptionalTextureFormats)
-      .filter(t => kTextureFormatInfo[t.format].renderable && kTextureFormatInfo[t.format].color)
+      .filter(t => !!kTextureFormatInfo[t.format].colorRender)
       .combine('enable_required_feature', [true, false])
   )
   .beforeAllSubcases(t => {
@@ -418,11 +426,7 @@ g.test('render_bundle_encoder_descriptor_depth_stencil_format')
   .params(u =>
     u
       .combine('format', kOptionalTextureFormats)
-      .filter(
-        t =>
-          kTextureFormatInfo[t.format].renderable &&
-          (kTextureFormatInfo[t.format].depth || kTextureFormatInfo[t.format].stencil)
-      )
+      .filter(t => !!(kTextureFormatInfo[t.format].depth || kTextureFormatInfo[t.format].stencil))
       .combine('enable_required_feature', [true, false])
   )
   .beforeAllSubcases(t => {
@@ -442,4 +446,19 @@ g.test('render_bundle_encoder_descriptor_depth_stencil_format')
         depthStencilFormat: format,
       });
     });
+  });
+
+g.test('check_capability_guarantees')
+  .desc(
+    `check "texture-compression-bc" is supported or both "texture-compression-etc2" and "texture-compression-astc" are supported.`
+  )
+  .fn(async t => {
+    const adapter = await getGPU(t.rec).requestAdapter();
+    assert(adapter !== null);
+
+    const features = adapter.features;
+    t.expect(
+      features.has('texture-compression-bc') ||
+        (features.has('texture-compression-etc2') && features.has('texture-compression-astc'))
+    );
   });
