@@ -1,6 +1,6 @@
 import { TestCaseRecorder } from '../internal/logging/test_case_recorder.js';
 import { JSONWithUndefined } from '../internal/params_utils.js';
-import { assert, unreachable } from '../util/util.js';
+import { assert, ExceptionCheckOptions, unreachable } from '../util/util.js';
 
 export class SkipTestCase extends Error {}
 export class UnexpectedPassError extends Error {}
@@ -14,23 +14,17 @@ export type TestParams = {
 
 type DestroyableObject =
   | { destroy(): void }
+  | { destroyAsync(): Promise<void> }
   | { close(): void }
-  | { getExtension(extensionName: 'WEBGL_lose_context'): WEBGL_lose_context };
+  | { getExtension(extensionName: 'WEBGL_lose_context'): WEBGL_lose_context }
+  | HTMLVideoElement;
 
 export class SubcaseBatchState {
-  private _params: TestParams;
-
-  constructor(params: TestParams) {
-    this._params = params;
-  }
-
-  /**
-   * Returns the case parameters for this test fixture shared state. Subcase params
-   * are not included.
-   */
-  get params(): TestParams {
-    return this._params;
-  }
+  constructor(
+    protected readonly recorder: TestCaseRecorder,
+    /** The case parameters for this test fixture shared state. Subcase params are not included. */
+    public readonly params: TestParams
+  ) {}
 
   /**
    * Runs before the `.before()` function.
@@ -47,6 +41,18 @@ export class SubcaseBatchState {
    * @internal MAINTENANCE_TODO: Make this not visible to test code?
    */
   async finalize() {}
+
+  /** Throws an exception marking the subcase as skipped. */
+  skip(msg: string): never {
+    throw new SkipTestCase(msg);
+  }
+
+  /** Throws an exception making the subcase as skipped if condition is true */
+  skipIf(cond: boolean, msg: string | (() => string) = '') {
+    if (cond) {
+      this.skip(typeof msg === 'function' ? msg() : msg);
+    }
+  }
 }
 
 /**
@@ -62,13 +68,13 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
    *
    * @internal
    */
-  protected rec: TestCaseRecorder;
+  readonly rec: TestCaseRecorder;
   private eventualExpectations: Array<Promise<unknown>> = [];
   private numOutstandingAsyncExpectations = 0;
   private objectsToCleanUp: DestroyableObject[] = [];
 
-  public static MakeSharedState(params: TestParams): SubcaseBatchState {
-    return new SubcaseBatchState(params);
+  public static MakeSharedState(recorder: TestCaseRecorder, params: TestParams): SubcaseBatchState {
+    return new SubcaseBatchState(recorder, params);
   }
 
   /** @internal */
@@ -132,8 +138,14 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
         if (WEBGL_lose_context) WEBGL_lose_context.loseContext();
       } else if ('destroy' in o) {
         o.destroy();
-      } else {
+      } else if ('destroyAsync' in o) {
+        await o.destroyAsync();
+      } else if ('close' in o) {
         o.close();
+      } else {
+        // HTMLVideoElement
+        o.src = '';
+        o.srcObject = null;
       }
     }
   }
@@ -141,11 +153,29 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
   /**
    * Tracks an object to be cleaned up after the test finishes.
    *
-   * MAINTENANCE_TODO: Use this in more places. (Will be easier once .destroy() is allowed on
-   * invalid objects.)
+   * Usually when creating buffers/textures/query sets, you can use the helpers in GPUTest instead.
    */
-  trackForCleanup<T extends DestroyableObject>(o: T): T {
-    this.objectsToCleanUp.push(o);
+  trackForCleanup<T extends DestroyableObject | Promise<DestroyableObject>>(o: T): T {
+    if (o instanceof Promise) {
+      this.eventualAsyncExpectation(() =>
+        o.then(
+          o => this.trackForCleanup(o),
+          () => {}
+        )
+      );
+      return o;
+    }
+
+    if (o instanceof GPUDevice) {
+      this.objectsToCleanUp.push({
+        async destroyAsync() {
+          o.destroy();
+          await o.lost;
+        },
+      });
+    } else {
+      this.objectsToCleanUp.push(o);
+    }
     return o;
   }
 
@@ -158,10 +188,16 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
         o instanceof WebGLRenderingContext ||
         o instanceof WebGL2RenderingContext
       ) {
-        this.objectsToCleanUp.push((o as unknown) as DestroyableObject);
+        this.objectsToCleanUp.push(o as unknown as DestroyableObject);
       }
     }
     return o;
+  }
+
+  /** Call requestDevice() and track the device for cleanup. */
+  requestDeviceTracked(adapter: GPUAdapter, desc: GPUDeviceDescriptor | undefined = undefined) {
+    // eslint-disable-next-line no-restricted-syntax
+    return this.trackForCleanup(adapter.requestDevice(desc));
   }
 
   /** Log a debug message. */
@@ -169,9 +205,24 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
     this.rec.debug(new Error(msg));
   }
 
+  /**
+   * Log an info message.
+   * **Use sparingly. Use `debug()` instead if logs are only needed with debug logging enabled.**
+   */
+  info(msg: string): void {
+    this.rec.info(new Error(msg));
+  }
+
   /** Throws an exception marking the subcase as skipped. */
   skip(msg: string): never {
     throw new SkipTestCase(msg);
+  }
+
+  /** Throws an exception marking the subcase as skipped if condition is true */
+  skipIf(cond: boolean, msg: string | (() => string) = '') {
+    if (cond) {
+      this.skip(typeof msg === 'function' ? msg() : msg);
+    }
   }
 
   /** Log a warning and increase the result status to "Warn". */
@@ -238,26 +289,42 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
   }
 
   /** Expect that the provided promise rejects, with the provided exception name. */
-  shouldReject(expectedName: string, p: Promise<unknown>, msg?: string): void {
+  shouldReject(
+    expectedName: string,
+    p: Promise<unknown>,
+    { allowMissingStack = false, message }: ExceptionCheckOptions = {}
+  ): void {
     this.eventualAsyncExpectation(async niceStack => {
-      const m = msg ? ': ' + msg : '';
+      const m = message ? ': ' + message : '';
       try {
         await p;
         niceStack.message = 'DID NOT REJECT' + m;
         this.rec.expectationFailed(niceStack);
       } catch (ex) {
-        niceStack.message = 'rejected as expected' + m;
         this.expectErrorValue(expectedName, ex, niceStack);
+        if (!allowMissingStack) {
+          if (!(ex instanceof Error && typeof ex.stack === 'string')) {
+            const exMessage = ex instanceof Error ? ex.message : '?';
+            niceStack.message = `rejected as expected, but missing stack (${exMessage})${m}`;
+            this.rec.expectationFailed(niceStack);
+          }
+        }
       }
     });
   }
 
   /**
-   * Expect that the provided function throws.
-   * If an `expectedName` is provided, expect that the throw exception has that name.
+   * Expect that the provided function throws (if `true` or `string`) or not (if `false`).
+   * If a string is provided, expect that the throw exception has that name.
+   *
+   * MAINTENANCE_TODO: Change to `string | false` so the exception name is always checked.
    */
-  shouldThrow(expectedError: string | boolean, fn: () => void, msg?: string): void {
-    const m = msg ? ': ' + msg : '';
+  shouldThrow(
+    expectedError: string | boolean,
+    fn: () => void,
+    { allowMissingStack = false, message }: ExceptionCheckOptions = {}
+  ) {
+    const m = message ? ': ' + message : '';
     try {
       fn();
       if (expectedError === false) {
@@ -270,6 +337,11 @@ export class Fixture<S extends SubcaseBatchState = SubcaseBatchState> {
         this.rec.expectationFailed(new Error('threw unexpectedly' + m));
       } else {
         this.expectErrorValue(expectedError, ex, new Error(m));
+        if (!allowMissingStack) {
+          if (!(ex instanceof Error && typeof ex.stack === 'string')) {
+            this.rec.expectationFailed(new Error('threw as expected, but missing stack' + m));
+          }
+        }
       }
     }
   }
@@ -338,12 +410,12 @@ export type SubcaseBatchStateFromFixture<F> = F extends Fixture<infer S> ? S : n
  */
 export type FixtureClass<F extends Fixture = Fixture> = {
   new (sharedState: SubcaseBatchStateFromFixture<F>, log: TestCaseRecorder, params: TestParams): F;
-  MakeSharedState(params: TestParams): SubcaseBatchStateFromFixture<F>;
+  MakeSharedState(recorder: TestCaseRecorder, params: TestParams): SubcaseBatchStateFromFixture<F>;
 };
 export type FixtureClassInterface<F extends Fixture = Fixture> = {
   /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
   new (...args: any[]): F;
-  MakeSharedState(params: TestParams): SubcaseBatchStateFromFixture<F>;
+  MakeSharedState(recorder: TestCaseRecorder, params: TestParams): SubcaseBatchStateFromFixture<F>;
 };
 export type FixtureClassWithMixin<FC, M> = FC extends FixtureClass<infer F>
   ? FixtureClass<F & M>

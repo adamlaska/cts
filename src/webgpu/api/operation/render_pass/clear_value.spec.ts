@@ -5,13 +5,13 @@ Tests for render pass clear values.
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
 import { assert } from '../../../../common/util/util.js';
 import {
-  kTextureFormatInfo,
-  kDepthStencilFormats,
   depthStencilFormatAspectSize,
-} from '../../../capability_info.js';
-import { GPUTest } from '../../../gpu_test.js';
+  kStencilTextureFormats,
+  isDepthTextureFormat,
+} from '../../../format_info.js';
+import { AllFeaturesMaxLimitsGPUTest } from '../../../gpu_test.js';
 
-export const g = makeTestGroup(GPUTest);
+export const g = makeTestGroup(AllFeaturesMaxLimitsGPUTest);
 
 g.test('stored')
   .desc(`Test render pass clear values are stored at the end of an empty pass.`)
@@ -48,31 +48,24 @@ g.test('stencil_clear_value')
   )
   .params(u =>
     u
-      .combine('stencilFormat', kDepthStencilFormats)
+      .combine('stencilFormat', kStencilTextureFormats)
       .combine('stencilClearValue', [0, 1, 0xff, 0x100 + 2, 0x10000 + 3])
       .combine('applyStencilClearValueAsStencilReferenceValue', [true, false])
-      .filter(t => kTextureFormatInfo[t.stencilFormat].stencil)
   )
-  .beforeAllSubcases(t => {
-    const { stencilFormat } = t.params;
-    const info = kTextureFormatInfo[stencilFormat];
-    t.selectDeviceOrSkipTestCase(info.feature);
-  })
   .fn(t => {
-    const {
-      stencilFormat,
-      stencilClearValue,
-      applyStencilClearValueAsStencilReferenceValue,
-    } = t.params;
+    const { stencilFormat, stencilClearValue, applyStencilClearValueAsStencilReferenceValue } =
+      t.params;
+
+    t.skipIfTextureFormatNotSupported(stencilFormat);
 
     const kSize = [1, 1, 1] as const;
     const colorFormat = 'rgba8unorm';
-    const stencilTexture = t.device.createTexture({
+    const stencilTexture = t.createTextureTracked({
       format: stencilFormat,
       size: kSize,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
-    const colorTexture = t.device.createTexture({
+    const colorTexture = t.createTextureTracked({
       format: colorFormat,
       size: kSize,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
@@ -110,6 +103,7 @@ g.test('stencil_clear_value')
       depthStencil: {
         format: stencilFormat,
         depthCompare: 'always',
+        depthWriteEnabled: false,
         stencilFront: {
           compare: 'equal',
         },
@@ -138,11 +132,12 @@ g.test('stencil_clear_value')
 
     const depthStencilAttachment: GPURenderPassDepthStencilAttachment = {
       view: stencilTexture.createView(),
+      depthClearValue: 0,
       stencilLoadOp: 'clear',
       stencilStoreOp: 'store',
       stencilClearValue,
     };
-    if (kTextureFormatInfo[stencilFormat].depth) {
+    if (isDepthTextureFormat(stencilFormat)) {
       depthStencilAttachment.depthClearValue = 0;
       depthStencilAttachment.depthLoadOp = 'clear';
       depthStencilAttachment.depthStoreOp = 'store';
@@ -163,11 +158,10 @@ g.test('stencil_clear_value')
     renderPassEncoder.draw(6);
     renderPassEncoder.end();
 
-    const destinationBuffer = t.device.createBuffer({
+    const destinationBuffer = t.createBufferTracked({
       usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       size: 4,
     });
-    t.trackForCleanup(destinationBuffer);
     encoder.copyTextureToBuffer(
       {
         texture: stencilTexture,

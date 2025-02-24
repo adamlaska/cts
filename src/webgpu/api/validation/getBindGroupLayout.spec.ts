@@ -12,8 +12,8 @@ export const g = makeTestGroup(ValidationTest);
 g.test('index_range,explicit_layout')
   .desc(
     `
-  Test that a validation error is generated if the index exceeds the size of the bind group layouts
-  using a pipeline with an explicit layout.
+  Test that a validation error is generated if the index is greater than the maximum number of bind
+  groups.
   `
   )
   .params(u => u.combine('index', [0, 1, 2, 3, 4, 5]))
@@ -24,7 +24,6 @@ g.test('index_range,explicit_layout')
       entries: [],
     });
 
-    const kBindGroupLayoutsSizeInPipelineLayout = 1;
     const pipelineLayout = t.device.createPipelineLayout({
       bindGroupLayouts: [pipelineBindGroupLayouts],
     });
@@ -54,7 +53,7 @@ g.test('index_range,explicit_layout')
       },
     });
 
-    const shouldError = index >= kBindGroupLayoutsSizeInPipelineLayout;
+    const shouldError = index >= t.device.limits.maxBindGroups;
 
     t.expectValidationError(() => {
       pipeline.getBindGroupLayout(index);
@@ -64,15 +63,13 @@ g.test('index_range,explicit_layout')
 g.test('index_range,auto_layout')
   .desc(
     `
-  Test that a validation error is generated if the index exceeds the size of the bind group layouts
-  using a pipeline with an auto layout.
+  Test that a validation error is generated if the index is greater than the maximum number of bind
+  groups.
   `
   )
   .params(u => u.combine('index', [0, 1, 2, 3, 4, 5]))
   .fn(t => {
     const { index } = t.params;
-
-    const kBindGroupLayoutsSizeInPipelineLayout = 1;
 
     const pipeline = t.device.createRenderPipeline({
       layout: 'auto',
@@ -101,7 +98,7 @@ g.test('index_range,auto_layout')
       },
     });
 
-    const shouldError = index >= kBindGroupLayoutsSizeInPipelineLayout;
+    const shouldError = index >= t.device.limits.maxBindGroups;
 
     t.expectValidationError(() => {
       pipeline.getBindGroupLayout(index);
@@ -143,9 +140,9 @@ g.test('unique_js_object,auto_layout')
     });
 
     const kIndex = 0;
-    const bgl1 = (pipeline.getBindGroupLayout(kIndex) as unknown) as Record<string, number>;
+    const bgl1 = pipeline.getBindGroupLayout(kIndex) as unknown as Record<string, number>;
     bgl1.extra = 42;
-    const bgl2 = (pipeline.getBindGroupLayout(kIndex) as unknown) as Record<string, number>;
+    const bgl2 = pipeline.getBindGroupLayout(kIndex) as unknown as Record<string, number>;
 
     assert(bgl1 !== bgl2, 'objects are not the same object');
     assert(bgl2.extra === undefined, 'objects do not retain expando properties');
@@ -192,9 +189,9 @@ g.test('unique_js_object,explicit_layout')
     });
 
     const kIndex = 0;
-    const bgl1 = (pipeline.getBindGroupLayout(kIndex) as unknown) as Record<string, number>;
+    const bgl1 = pipeline.getBindGroupLayout(kIndex) as unknown as Record<string, number>;
     bgl1.extra = 42;
-    const bgl2 = (pipeline.getBindGroupLayout(kIndex) as unknown) as Record<string, number>;
+    const bgl2 = pipeline.getBindGroupLayout(kIndex) as unknown as Record<string, number>;
 
     assert(bgl1 !== bgl2, 'objects are not the same object');
     assert(bgl2.extra === undefined, 'objects do not retain expando properties');

@@ -10,12 +10,12 @@ TODO:
 import { makeTestGroup } from '../../../../common/framework/test_group.js';
 import { assert, TypedArrayBufferView, unreachable } from '../../../../common/util/util.js';
 import {
+  IsDualSourceBlendingFactor,
   kBlendFactors,
   kBlendOperations,
-  kEncodableTextureFormats,
-  kTextureFormatInfo,
 } from '../../../capability_info.js';
 import { GPUConst } from '../../../constants.js';
+import { kRegularTextureFormats, kTextureFormatInfo } from '../../../format_info.js';
 import { GPUTest, TextureTestMixin } from '../../../gpu_test.js';
 import { clamp } from '../../../util/math.js';
 import { TexelView } from '../../../util/texture/texel_view.js';
@@ -89,6 +89,7 @@ function mapColor(
 
 function computeBlendFactor(
   src: GPUColorDict,
+  src1: GPUColorDict,
   dst: GPUColorDict,
   blendColor: GPUColorDict | undefined,
   factor: GPUBlendFactor
@@ -124,6 +125,14 @@ function computeBlendFactor(
     case 'one-minus-constant':
       assert(blendColor !== undefined);
       return mapColor(blendColor, v => 1 - v);
+    case 'src1':
+      return { ...src1 };
+    case 'one-minus-src1':
+      return mapColor(src1, v => 1 - v);
+    case 'src1-alpha':
+      return mapColor(src1, () => src1.a);
+    case 'one-minus-src1-alpha':
+      return mapColor(src1, () => 1 - src1.a);
     default:
       unreachable();
   }
@@ -150,6 +159,7 @@ function computeBlendOperation(
   }
 }
 
+const kBlendingGPUBlendComponentFormat = 'rgba16float';
 g.test('blending,GPUBlendComponent')
   .desc(
     `Test all combinations of parameters for GPUBlendComponent.
@@ -169,6 +179,7 @@ g.test('blending,GPUBlendComponent')
       .combine('component', ['color', 'alpha'] as const)
       .combine('srcFactor', kBlendFactors)
       .combine('dstFactor', kBlendFactors)
+      .beginSubcases()
       .combine('operation', kBlendOperations)
       .filter(t => {
         if (t.operation === 'min' || t.operation === 'max') {
@@ -176,8 +187,8 @@ g.test('blending,GPUBlendComponent')
         }
         return true;
       })
-      .beginSubcases()
       .combine('srcColor', [{ r: 0.11, g: 0.61, b: 0.81, a: 0.44 }])
+      .combine('srcColor1', [{ r: 0.22, g: 0.41, b: 0.51, a: 0.33 }])
       .combine('dstColor', [
         { r: 0.51, g: 0.22, b: 0.71, a: 0.33 },
         { r: 0.09, g: 0.73, b: 0.93, a: 0.81 },
@@ -191,14 +202,35 @@ g.test('blending,GPUBlendComponent')
         return needsBlendConstant ? [{ r: 0.91, g: 0.82, b: 0.73, a: 0.64 }] : [undefined];
       })
   )
+  .beforeAllSubcases(t => {
+    if (
+      IsDualSourceBlendingFactor(t.params.srcFactor) ||
+      IsDualSourceBlendingFactor(t.params.dstFactor)
+    ) {
+      t.selectDeviceOrSkipTestCase('dual-source-blending');
+    }
+  })
   .fn(t => {
-    const textureFormat: GPUTextureFormat = 'rgba16float';
+    const textureFormat: GPUTextureFormat = kBlendingGPUBlendComponentFormat;
     const srcColor = t.params.srcColor;
+    const srcColor1 = t.params.srcColor1;
     const dstColor = t.params.dstColor;
     const blendConstant = t.params.blendConstant;
 
-    const srcFactor = computeBlendFactor(srcColor, dstColor, blendConstant, t.params.srcFactor);
-    const dstFactor = computeBlendFactor(srcColor, dstColor, blendConstant, t.params.dstFactor);
+    const srcFactor = computeBlendFactor(
+      srcColor,
+      srcColor1,
+      dstColor,
+      blendConstant,
+      t.params.srcFactor
+    );
+    const dstFactor = computeBlendFactor(
+      srcColor,
+      srcColor1,
+      dstColor,
+      blendConstant,
+      t.params.dstFactor
+    );
 
     const expectedColor = computeBlendOperation(
       srcColor,
@@ -218,6 +250,10 @@ g.test('blending,GPUBlendComponent')
         expectedColor.b = srcColor.b;
         break;
     }
+
+    const useBlendSrc1 =
+      IsDualSourceBlendingFactor(t.params.srcFactor) ||
+      IsDualSourceBlendingFactor(t.params.dstFactor);
 
     const pipeline = t.device.createRenderPipeline({
       layout: 'auto',
@@ -240,13 +276,24 @@ g.test('blending,GPUBlendComponent')
         ],
         module: t.device.createShaderModule({
           code: `
+${useBlendSrc1 ? 'enable dual_source_blending;' : ''}
+
 struct Uniform {
-  color: vec4<f32>
+  color: vec4f,
+  blend: vec4f,
 };
 @group(0) @binding(0) var<uniform> u : Uniform;
 
-@fragment fn main() -> @location(0) vec4<f32> {
-  return u.color;
+struct FragOutput {
+  @location(0) ${useBlendSrc1 ? '@blend_src(0)' : ''} color : vec4f,
+  ${useBlendSrc1 ? '@location(0) @blend_src(1) blend : vec4f,' : ''}
+}
+
+@fragment fn main() ->FragOutput {
+  var fragOutput : FragOutput;
+  fragOutput.color = u.color;
+  ${useBlendSrc1 ? 'fragOutput.blend = u.blend;' : ''}
+  return fragOutput;
 }
           `,
         }),
@@ -267,7 +314,7 @@ struct Uniform {
       },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [1, 1, 1],
       format: textureFormat,
@@ -297,7 +344,16 @@ struct Uniform {
             binding: 0,
             resource: {
               buffer: t.makeBufferWithContents(
-                new Float32Array([srcColor.r, srcColor.g, srcColor.b, srcColor.a]),
+                new Float32Array([
+                  srcColor.r,
+                  srcColor.g,
+                  srcColor.b,
+                  srcColor.a,
+                  srcColor1.r,
+                  srcColor1.g,
+                  srcColor1.b,
+                  srcColor1.a,
+                ]),
                 GPUBufferUsage.UNIFORM
               ),
             },
@@ -322,9 +378,9 @@ struct Uniform {
     );
   });
 
-const kBlendableFormats = kEncodableTextureFormats.filter(f => {
+const kBlendableFormats = kRegularTextureFormats.filter(f => {
   const info = kTextureFormatInfo[f];
-  return info.renderable && info.sampleType === 'float';
+  return info.colorRender && info.color.type === 'float';
 });
 
 g.test('blending,formats')
@@ -336,6 +392,9 @@ g.test('blending,formats')
     u //
       .combine('format', kBlendableFormats)
   )
+  .beforeAllSubcases(t => {
+    t.skipIfTextureFormatNotSupportedDeprecated(t.params.format);
+  })
   .fn(t => {
     const { format } = t.params;
 
@@ -375,7 +434,7 @@ g.test('blending,formats')
       },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [1, 1, 1],
       format,
@@ -398,7 +457,7 @@ g.test('blending,formats')
     t.device.queue.submit([commandEncoder.finish()]);
 
     const expColor = { R: 0.6, G: 0.6, B: 0.6, A: 0.6 };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [1, 1, 1]);
   });
 
@@ -415,7 +474,7 @@ g.test('blend_constant,initial')
       blend: { color: blendComponent, alpha: blendComponent },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [kSize, kSize],
       format,
@@ -446,7 +505,7 @@ g.test('blend_constant,initial')
     // Check that the initial blend constant is black(0,0,0,0) after setting testPipeline which has
     // a white color buffer data.
     const expColor = { R: 0, G: 0, B: 0, A: 0 };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [
       kSize,
       kSize,
@@ -473,7 +532,7 @@ g.test('blend_constant,setting')
       blend: { color: blendComponent, alpha: blendComponent },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [kSize, kSize],
       format,
@@ -504,7 +563,7 @@ g.test('blend_constant,setting')
     // Check that the blend constant is the same as the given constant after setting the constant
     // via setBlendConstant.
     const expColor = { R: r, G: g, B: b, A: a };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
 
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [
       kSize,
@@ -525,7 +584,7 @@ g.test('blend_constant,not_inherited')
       blend: { color: blendComponent, alpha: blendComponent },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [kSize, kSize],
       format,
@@ -577,7 +636,7 @@ g.test('blend_constant,not_inherited')
 
     // Check that the blend constant is not inherited from the first render pass.
     const expColor = { R: 0, G: 0, B: 0, A: 0 };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
 
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [
       kSize,
@@ -586,22 +645,7 @@ g.test('blend_constant,not_inherited')
   });
 
 const kColorWriteCombinations: readonly GPUColorWriteFlags[] = [
-  0,
-  1,
-  2,
-  3,
-  4,
-  5,
-  6,
-  7,
-  8,
-  9,
-  10,
-  11,
-  12,
-  13,
-  14,
-  15,
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 ];
 
 g.test('color_write_mask,channel_work')
@@ -643,7 +687,7 @@ g.test('color_write_mask,channel_work')
       writeMask: mask,
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [kSize, kSize],
       format,
@@ -673,7 +717,7 @@ g.test('color_write_mask,channel_work')
     t.device.queue.submit([commandEncoder.finish()]);
 
     const expColor = { R: r, G: g, B: b, A: a };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
 
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [
       kSize,
@@ -699,7 +743,7 @@ g.test('color_write_mask,blending_disabled')
       writeMask: GPUColorWrite.RED,
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [kSize, kSize],
       format,
@@ -731,7 +775,7 @@ g.test('color_write_mask,blending_disabled')
     t.device.queue.submit([commandEncoder.finish()]);
 
     const expColor = { R: 1, G: 0, B: 0, A: 0 };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
 
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [
       kSize,
@@ -795,7 +839,7 @@ g.test('blending,clamping')
       },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       size: [1, 1, 1],
       format,
@@ -828,7 +872,7 @@ g.test('blending,clamping')
     }
 
     const expColor = { R: expValue, G: expValue, B: expValue, A: expValue };
-    const expTexelView = TexelView.fromTexelsAsColors(format, coords => expColor);
+    const expTexelView = TexelView.fromTexelsAsColors(format, _coords => expColor);
 
     t.expectTexelViewComparisonIsOkInTexture({ texture: renderTarget }, expTexelView, [1, 1, 1]);
   });

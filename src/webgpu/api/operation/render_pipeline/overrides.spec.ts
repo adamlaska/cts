@@ -14,7 +14,7 @@ class F extends GPUTest {
     vertex: GPUVertexState,
     fragment: GPUFragmentState
   ) {
-    const renderTarget = this.device.createTexture({
+    const renderTarget = this.createTextureTracked({
       format,
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
@@ -41,7 +41,6 @@ class F extends GPUTest {
       colorAttachments: [
         {
           view: renderTarget.createView(),
-          storeOp: 'store',
           clearValue: {
             r: kClearValueResult.R,
             g: kClearValueResult.G,
@@ -49,6 +48,7 @@ class F extends GPUTest {
             a: kClearValueResult.A,
           },
           loadOp: 'clear',
+          storeOp: 'store',
         },
       ],
     });
@@ -171,6 +171,7 @@ g.test('basic')
     );
   });
 
+const kPrecisionTestFormat = 'rgba32float';
 g.test('precision')
   .desc(`Test that the float number precision is preserved for constants`)
   .params(u =>
@@ -184,17 +185,14 @@ g.test('precision')
           fragmentConstants: { R: 3.14159 } as Record<string, GPUPipelineConstantValue>,
         },
         {
-          expected: { R: 3.141592653589793238, G: 1.0, B: 1.0, A: 1.0 },
+          expected: { R: 3.141592653589793, G: 1.0, B: 1.0, A: 1.0 },
           vertexConstants: {},
-          fragmentConstants: { R: 3.141592653589793238 } as Record<
-            string,
-            GPUPipelineConstantValue
-          >,
+          fragmentConstants: { R: 3.141592653589793 } as Record<string, GPUPipelineConstantValue>,
         },
       ])
   )
   .fn(async t => {
-    const format = 'rgba32float';
+    const format = kPrecisionTestFormat;
     await t.ExpectShaderOutputWithConstants(
       t.params.isAsync,
       format,
@@ -314,12 +312,12 @@ g.test('shared_shader_module')
       t.params.fragmentConstants1
     );
 
-    const renderTarget0 = t.device.createTexture({
+    const renderTarget0 = t.createTextureTracked({
       format,
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
     });
-    const renderTarget1 = t.device.createTexture({
+    const renderTarget1 = t.createTextureTracked({
       format,
       size: { width: 1, height: 1, depthOrArrayLayers: 1 },
       usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
@@ -331,7 +329,6 @@ g.test('shared_shader_module')
       colorAttachments: [
         {
           view: renderTarget0.createView(),
-          storeOp: 'store',
           clearValue: {
             r: kClearValueResult.R,
             g: kClearValueResult.G,
@@ -339,6 +336,7 @@ g.test('shared_shader_module')
             a: kClearValueResult.A,
           },
           loadOp: 'clear',
+          storeOp: 'store',
         },
       ],
     });
@@ -350,7 +348,6 @@ g.test('shared_shader_module')
       colorAttachments: [
         {
           view: renderTarget1.createView(),
-          storeOp: 'store',
           clearValue: {
             r: kClearValueResult.R,
             g: kClearValueResult.G,
@@ -358,6 +355,7 @@ g.test('shared_shader_module')
             a: kClearValueResult.A,
           },
           loadOp: 'clear',
+          storeOp: 'store',
         },
       ],
     });
@@ -420,7 +418,7 @@ g.test('multi_entry_points')
       override B: f32 = 3.0;
       override C: f32;
       override D: f32;
-      
+
       @vertex fn vertexMain(
           @builtin(vertex_index) VertexIndex : u32
           ) -> @builtin(position) vec4<f32> {

@@ -17,10 +17,9 @@ const kRenderTargetFormat = 'rgba8unorm';
 class F extends GPUTest {
   MakeIndexBuffer(): GPUBuffer {
     return this.makeBufferWithContents(
-      /* prettier-ignore */
-      new Uint32Array([
-        0,  1,  2, // The bottom left triangle
-        1,  2,  3, // The top right triangle
+      /* prettier-ignore */ new Uint32Array([
+        0, 1, 2, // The bottom left triangle
+        1, 2, 3, // The top right triangle
       ]),
       GPUBufferUsage.INDEX
     );
@@ -205,7 +204,7 @@ Params:
       },
     });
 
-    const renderTarget = t.device.createTexture({
+    const renderTarget = t.createTextureTracked({
       size: [4, 4],
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       format: kRenderTargetFormat,
